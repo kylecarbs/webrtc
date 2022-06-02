@@ -6,6 +6,7 @@ package webrtc
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"strconv"
 	"strings"
@@ -371,7 +372,7 @@ func TestPeerConnection_Transceiver_Mid(t *testing.T) {
 	// Must have 3 media descriptions (2 video channels)
 	assert.Equal(t, len(offer.parsed.MediaDescriptions), 2)
 
-	assert.True(t, sdpMidHasSsrc(offer, "0", sender1.ssrc), "Expected mid %q with ssrc %d, offer.SDP: %s", "0", sender1.ssrc, offer.SDP)
+	assert.True(t, sdpMidHasSsrc(offer, "0", sender1.trackEncodings[0].ssrc), "Expected mid %q with ssrc %d, offer.SDP: %s", "0", sender1.trackEncodings[0].ssrc, offer.SDP)
 
 	// Remove first track, must keep same number of media
 	// descriptions and same track ssrc for mid 1 as previous
@@ -382,7 +383,7 @@ func TestPeerConnection_Transceiver_Mid(t *testing.T) {
 
 	assert.Equal(t, len(offer.parsed.MediaDescriptions), 2)
 
-	assert.True(t, sdpMidHasSsrc(offer, "1", sender2.ssrc), "Expected mid %q with ssrc %d, offer.SDP: %s", "1", sender2.ssrc, offer.SDP)
+	assert.True(t, sdpMidHasSsrc(offer, "1", sender2.trackEncodings[0].ssrc), "Expected mid %q with ssrc %d, offer.SDP: %s", "1", sender2.trackEncodings[0].ssrc, offer.SDP)
 
 	_, err = pcAnswer.CreateAnswer(nil)
 	assert.Equal(t, err, &rtcerr.InvalidStateError{Err: ErrIncorrectSignalingState})
@@ -402,8 +403,8 @@ func TestPeerConnection_Transceiver_Mid(t *testing.T) {
 	// We reuse the existing non-sending transceiver
 	assert.Equal(t, len(offer.parsed.MediaDescriptions), 2)
 
-	assert.True(t, sdpMidHasSsrc(offer, "0", sender3.ssrc), "Expected mid %q with ssrc %d, offer.sdp: %s", "0", sender3.ssrc, offer.SDP)
-	assert.True(t, sdpMidHasSsrc(offer, "1", sender2.ssrc), "Expected mid %q with ssrc %d, offer.sdp: %s", "1", sender2.ssrc, offer.SDP)
+	assert.True(t, sdpMidHasSsrc(offer, "0", sender3.trackEncodings[0].ssrc), "Expected mid %q with ssrc %d, offer.sdp: %s", "0", sender3.trackEncodings[0].ssrc, offer.SDP)
+	assert.True(t, sdpMidHasSsrc(offer, "1", sender2.trackEncodings[0].ssrc), "Expected mid %q with ssrc %d, offer.sdp: %s", "1", sender2.trackEncodings[0].ssrc, offer.SDP)
 
 	closePairNow(t, pcOffer, pcAnswer)
 }
@@ -438,7 +439,7 @@ func TestPeerConnection_Renegotiation_CodecChange(t *testing.T) {
 	pcAnswer.OnTrack(func(track *TrackRemote, r *RTPReceiver) {
 		tracksCh <- track
 		for {
-			if _, _, readErr := track.ReadRTP(); readErr == io.EOF {
+			if _, _, readErr := track.ReadRTP(); errors.Is(readErr, io.EOF) {
 				tracksClosed <- struct{}{}
 				return
 			}
@@ -527,7 +528,7 @@ func TestPeerConnection_Renegotiation_RemoveTrack(t *testing.T) {
 		onTrackFiredFunc()
 
 		for {
-			if _, _, err := track.ReadRTP(); err == io.EOF {
+			if _, _, err := track.ReadRTP(); errors.Is(err, io.EOF) {
 				trackClosedFunc()
 				return
 			}

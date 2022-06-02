@@ -428,7 +428,9 @@ func (pc *PeerConnection) checkNegotiationNeeded() bool { //nolint:gocognit
 
 // OnICECandidate sets an event handler which is invoked when a new ICE
 // candidate is found.
-// Take note that the handler is gonna be called with a nil pointer when
+// ICE candidate gathering only begins when SetLocalDescription or
+// SetRemoteDescription is called.
+// Take note that the handler will be called with a nil pointer when
 // gathering is finished.
 func (pc *PeerConnection) OnICECandidate(f func(*ICECandidate)) {
 	pc.iceGatherer.OnLocalCandidate(f)
@@ -633,8 +635,8 @@ func (pc *PeerConnection) CreateOffer(options *OfferOptions) (SessionDescription
 		// in-parallel steps to create an offer
 		// https://w3c.github.io/webrtc-pc/#dfn-in-parallel-steps-to-create-an-offer
 		isPlanB := pc.configuration.SDPSemantics == SDPSemanticsPlanB
-		if pc.currentRemoteDescription != nil {
-			isPlanB = descriptionIsPlanB(pc.currentRemoteDescription)
+		if pc.currentRemoteDescription != nil && isPlanB {
+			isPlanB = descriptionPossiblyPlanB(pc.currentRemoteDescription)
 		}
 
 		// include unmatched local transceivers
@@ -755,7 +757,7 @@ func (pc *PeerConnection) updateConnectionState(iceConnectionState ICEConnection
 
 func (pc *PeerConnection) createICETransport() *ICETransport {
 	t := pc.api.NewICETransport(pc.iceGatherer)
-	t.OnConnectionStateChange(func(state ICETransportState) {
+	t.internalOnConnectionStateChangeHandler.Store(func(state ICETransportState) {
 		var cs ICEConnectionState
 		switch state {
 		case ICETransportStateNew:
@@ -1030,7 +1032,11 @@ func (pc *PeerConnection) SetRemoteDescription(desc SessionDescription) error { 
 
 	var t *RTPTransceiver
 	localTransceivers := append([]*RTPTransceiver{}, pc.GetTransceivers()...)
-	detectedPlanB := descriptionIsPlanB(pc.RemoteDescription())
+	detectedPlanB := descriptionIsPlanB(pc.RemoteDescription(), pc.log)
+	if pc.configuration.SDPSemantics != SDPSemanticsUnifiedPlan {
+		detectedPlanB = descriptionPossiblyPlanB(pc.RemoteDescription())
+	}
+
 	weOffer := desc.Type == SDPTypeAnswer
 
 	if !weOffer && !detectedPlanB {
@@ -1353,7 +1359,7 @@ func (pc *PeerConnection) startRTPReceivers(remoteDesc *SessionDescription, curr
 	case SDPSemanticsPlanB:
 		remoteIsPlanB = true
 	case SDPSemanticsUnifiedPlanWithFallback:
-		remoteIsPlanB = descriptionIsPlanB(pc.RemoteDescription())
+		remoteIsPlanB = descriptionPossiblyPlanB(pc.RemoteDescription())
 	default:
 		// none
 	}
@@ -1651,7 +1657,10 @@ func (pc *PeerConnection) AddICECandidate(candidate ICECandidateInit) error {
 // ICEConnectionState returns the ICE connection state of the
 // PeerConnection instance.
 func (pc *PeerConnection) ICEConnectionState() ICEConnectionState {
-	return pc.iceConnectionState.Load().(ICEConnectionState)
+	if state, ok := pc.iceConnectionState.Load().(ICEConnectionState); ok {
+		return state
+	}
+	return ICEConnectionState(0)
 }
 
 // GetSenders returns the RTPSender that are currently attached to this PeerConnection
@@ -2071,7 +2080,10 @@ func (pc *PeerConnection) ICEGatheringState() ICEGatheringState {
 // ConnectionState attribute returns the connection state of the
 // PeerConnection instance.
 func (pc *PeerConnection) ConnectionState() PeerConnectionState {
-	return pc.connectionState.Load().(PeerConnectionState)
+	if state, ok := pc.connectionState.Load().(PeerConnectionState); ok {
+		return state
+	}
+	return PeerConnectionState(0)
 }
 
 // GetStats return data providing statistics about the overall connection
@@ -2244,7 +2256,7 @@ func (pc *PeerConnection) generateUnmatchedSDP(transceivers []*RTPTransceiver, u
 		return nil, err
 	}
 
-	return populateSDP(d, isPlanB, dtlsFingerprints, pc.api.settingEngine.sdpMediaLevelFingerprints, pc.api.settingEngine.candidates.ICELite, pc.api.mediaEngine, connectionRoleFromDtlsRole(defaultDtlsRoleOffer), candidates, iceParams, mediaSections, pc.ICEGatheringState())
+	return populateSDP(d, isPlanB, dtlsFingerprints, pc.api.settingEngine.sdpMediaLevelFingerprints, pc.api.settingEngine.candidates.ICELite, true, pc.api.mediaEngine, connectionRoleFromDtlsRole(defaultDtlsRoleOffer), candidates, iceParams, mediaSections, pc.ICEGatheringState())
 }
 
 // generateMatchedSDP generates a SDP and takes the remote state into account
@@ -2271,8 +2283,14 @@ func (pc *PeerConnection) generateMatchedSDP(transceivers []*RTPTransceiver, use
 	if pc.pendingRemoteDescription != nil {
 		remoteDescription = pc.pendingRemoteDescription
 	}
+	isExtmapAllowMixed := isExtMapAllowMixedSet(remoteDescription.parsed)
 	localTransceivers := append([]*RTPTransceiver{}, transceivers...)
-	detectedPlanB := descriptionIsPlanB(remoteDescription)
+
+	detectedPlanB := descriptionIsPlanB(remoteDescription, pc.log)
+	if pc.configuration.SDPSemantics != SDPSemanticsUnifiedPlan {
+		detectedPlanB = descriptionPossiblyPlanB(remoteDescription)
+	}
+
 	mediaSections := []mediaSection{}
 	alreadyHaveApplicationMediaSection := false
 	for _, media := range remoteDescription.parsed.MediaDescriptions {
@@ -2365,7 +2383,7 @@ func (pc *PeerConnection) generateMatchedSDP(transceivers []*RTPTransceiver, use
 		return nil, err
 	}
 
-	return populateSDP(d, detectedPlanB, dtlsFingerprints, pc.api.settingEngine.sdpMediaLevelFingerprints, pc.api.settingEngine.candidates.ICELite, pc.api.mediaEngine, connectionRole, candidates, iceParams, mediaSections, pc.ICEGatheringState())
+	return populateSDP(d, detectedPlanB, dtlsFingerprints, pc.api.settingEngine.sdpMediaLevelFingerprints, pc.api.settingEngine.candidates.ICELite, isExtmapAllowMixed, pc.api.mediaEngine, connectionRole, candidates, iceParams, mediaSections, pc.ICEGatheringState())
 }
 
 func (pc *PeerConnection) setGatherCompleteHandler(handler func()) {

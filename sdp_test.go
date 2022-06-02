@@ -354,7 +354,7 @@ func TestMediaDescriptionFingerprints(t *testing.T) {
 			s, err = populateSDP(s, false,
 				dtlsFingerprints,
 				SDPMediaDescriptionFingerprints,
-				false, engine, sdp.ConnectionRoleActive, []ICECandidate{}, ICEParameters{}, media, ICEGatheringStateNew)
+				false, true, engine, sdp.ConnectionRoleActive, []ICECandidate{}, ICEParameters{}, media, ICEGatheringStateNew)
 			assert.NoError(t, err)
 
 			sdparray, err := s.Marshal()
@@ -385,7 +385,7 @@ func TestPopulateSDP(t *testing.T) {
 
 		d := &sdp.SessionDescription{}
 
-		offerSdp, err := populateSDP(d, false, []DTLSFingerprint{}, se.sdpMediaLevelFingerprints, se.candidates.ICELite, me, connectionRoleFromDtlsRole(defaultDtlsRoleOffer), []ICECandidate{}, ICEParameters{}, mediaSections, ICEGatheringStateComplete)
+		offerSdp, err := populateSDP(d, false, []DTLSFingerprint{}, se.sdpMediaLevelFingerprints, se.candidates.ICELite, true, me, connectionRoleFromDtlsRole(defaultDtlsRoleOffer), []ICECandidate{}, ICEParameters{}, mediaSections, ICEGatheringStateComplete)
 		assert.Nil(t, err)
 
 		// Test contains rid map keys
@@ -428,7 +428,7 @@ func TestPopulateSDP(t *testing.T) {
 
 		d := &sdp.SessionDescription{}
 
-		offerSdp, err := populateSDP(d, false, []DTLSFingerprint{}, se.sdpMediaLevelFingerprints, se.candidates.ICELite, me, connectionRoleFromDtlsRole(defaultDtlsRoleOffer), []ICECandidate{}, ICEParameters{}, mediaSections, ICEGatheringStateComplete)
+		offerSdp, err := populateSDP(d, false, []DTLSFingerprint{}, se.sdpMediaLevelFingerprints, se.candidates.ICELite, true, me, connectionRoleFromDtlsRole(defaultDtlsRoleOffer), []ICECandidate{}, ICEParameters{}, mediaSections, ICEGatheringStateComplete)
 		assert.Nil(t, err)
 
 		// Test codecs
@@ -448,6 +448,91 @@ func TestPopulateSDP(t *testing.T) {
 			}
 		}
 		assert.Equal(t, true, foundVP8, "vp8 should be present in sdp")
+	})
+	t.Run("ice-lite", func(t *testing.T) {
+		se := SettingEngine{}
+		se.SetLite(true)
+
+		offerSdp, err := populateSDP(&sdp.SessionDescription{}, false, []DTLSFingerprint{}, se.sdpMediaLevelFingerprints, se.candidates.ICELite, true, &MediaEngine{}, connectionRoleFromDtlsRole(defaultDtlsRoleOffer), []ICECandidate{}, ICEParameters{}, []mediaSection{}, ICEGatheringStateComplete)
+		assert.Nil(t, err)
+
+		var found bool
+		// ice-lite is an session-level attribute
+		for _, a := range offerSdp.Attributes {
+			if a.Key == sdp.AttrKeyICELite {
+				// ice-lite does not have value (e.g. ":<value>") and it should be an empty string
+				if a.Value == "" {
+					found = true
+					break
+				}
+			}
+		}
+		assert.Equal(t, true, found, "ICELite key should be present")
+	})
+	t.Run("rejected track", func(t *testing.T) {
+		se := SettingEngine{}
+
+		me := &MediaEngine{}
+		registerCodecErr := me.RegisterCodec(RTPCodecParameters{
+			RTPCodecCapability: RTPCodecCapability{MimeType: MimeTypeVP8, ClockRate: 90000, Channels: 0, SDPFmtpLine: "", RTCPFeedback: nil},
+			PayloadType:        96,
+		}, RTPCodecTypeVideo)
+		assert.NoError(t, registerCodecErr)
+		api := NewAPI(WithMediaEngine(me))
+
+		videoTransceiver := &RTPTransceiver{kind: RTPCodecTypeVideo, api: api, codecs: me.videoCodecs}
+		audioTransceiver := &RTPTransceiver{kind: RTPCodecTypeAudio, api: api, codecs: []RTPCodecParameters{}}
+		mediaSections := []mediaSection{{id: "video", transceivers: []*RTPTransceiver{videoTransceiver}}, {id: "audio", transceivers: []*RTPTransceiver{audioTransceiver}}}
+
+		d := &sdp.SessionDescription{}
+
+		offerSdp, err := populateSDP(d, false, []DTLSFingerprint{}, se.sdpMediaLevelFingerprints, se.candidates.ICELite, true, me, connectionRoleFromDtlsRole(defaultDtlsRoleOffer), []ICECandidate{}, ICEParameters{}, mediaSections, ICEGatheringStateComplete)
+		assert.NoError(t, err)
+
+		// Test codecs
+		foundRejectedTrack := false
+		for _, desc := range offerSdp.MediaDescriptions {
+			if desc.MediaName.Media != "audio" {
+				continue
+			}
+			assert.True(t, desc.ConnectionInformation != nil, "connection information must be provided for rejected tracks")
+			assert.Equal(t, desc.MediaName.Formats, []string{"0"}, "rejected tracks have 0 for Formats")
+			assert.Equal(t, desc.MediaName.Port, sdp.RangedPort{Value: 0}, "rejected tracks have 0 for Port")
+			foundRejectedTrack = true
+		}
+		assert.Equal(t, true, foundRejectedTrack, "rejected track wasn't present")
+	})
+	t.Run("allow mixed extmap", func(t *testing.T) {
+		se := SettingEngine{}
+		offerSdp, err := populateSDP(&sdp.SessionDescription{}, false, []DTLSFingerprint{}, se.sdpMediaLevelFingerprints, se.candidates.ICELite, true, &MediaEngine{}, connectionRoleFromDtlsRole(defaultDtlsRoleOffer), []ICECandidate{}, ICEParameters{}, []mediaSection{}, ICEGatheringStateComplete)
+		assert.Nil(t, err)
+
+		var found bool
+		// session-level attribute
+		for _, a := range offerSdp.Attributes {
+			if a.Key == sdp.AttrKeyExtMapAllowMixed {
+				if a.Value == "" {
+					found = true
+					break
+				}
+			}
+		}
+		assert.Equal(t, true, found, "AllowMixedExtMap key should be present")
+
+		offerSdp, err = populateSDP(&sdp.SessionDescription{}, false, []DTLSFingerprint{}, se.sdpMediaLevelFingerprints, se.candidates.ICELite, false, &MediaEngine{}, connectionRoleFromDtlsRole(defaultDtlsRoleOffer), []ICECandidate{}, ICEParameters{}, []mediaSection{}, ICEGatheringStateComplete)
+		assert.Nil(t, err)
+
+		found = false
+		// session-level attribute
+		for _, a := range offerSdp.Attributes {
+			if a.Key == sdp.AttrKeyExtMapAllowMixed {
+				if a.Value == "" {
+					found = true
+					break
+				}
+			}
+		}
+		assert.Equal(t, false, found, "AllowMixedExtMap key should not be present")
 	})
 }
 

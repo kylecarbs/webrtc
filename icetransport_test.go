@@ -4,6 +4,7 @@
 package webrtc
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,6 +12,46 @@ import (
 	"github.com/pion/transport/test"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestICETransport_OnConnectionStateChange(t *testing.T) {
+	report := test.CheckRoutines(t)
+	defer report()
+
+	lim := test.TimeOut(time.Second * 30)
+	defer lim.Stop()
+
+	pcOffer, pcAnswer, err := newPair()
+	assert.NoError(t, err)
+
+	var (
+		iceComplete             sync.WaitGroup
+		peerConnectionConnected sync.WaitGroup
+	)
+	iceComplete.Add(2)
+	peerConnectionConnected.Add(2)
+
+	onIceComplete := func(s ICETransportState) {
+		if s == ICETransportStateConnected {
+			iceComplete.Done()
+		}
+	}
+	pcOffer.SCTP().Transport().ICETransport().OnConnectionStateChange(onIceComplete)
+	pcAnswer.SCTP().Transport().ICETransport().OnConnectionStateChange(onIceComplete)
+
+	onConnected := func(s PeerConnectionState) {
+		if s == PeerConnectionStateConnected {
+			peerConnectionConnected.Done()
+		}
+	}
+	pcOffer.OnConnectionStateChange(onConnected)
+	pcAnswer.OnConnectionStateChange(onConnected)
+
+	assert.NoError(t, signalPair(pcOffer, pcAnswer))
+	iceComplete.Wait()
+	peerConnectionConnected.Wait()
+
+	closePairNow(t, pcOffer, pcAnswer)
+}
 
 func TestICETransport_OnSelectedCandidatePairChange(t *testing.T) {
 	report := test.CheckRoutines(t)
